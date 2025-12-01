@@ -42,8 +42,10 @@ jobs:
       
       # 5. Set environment variables
       - name: Set environment variables
+        env:
+          LLAMA_API_KEY: ${{ secrets.LLAMA_API_KEY }}
         run: |
-          echo "LLAMA_CLOUD_API_KEY=${{ secrets.LLAMA_API_KEY }}" >> $GITHUB_ENV
+          echo "LLAMA_CLOUD_API_KEY=$LLAMA_API_KEY" >> $GITHUB_ENV
       
       # 6. Run the workflow (single execution, not continuous scheduler)
       - name: Run workflow
@@ -59,36 +61,14 @@ jobs:
               exit(1)
           "
       
-      # 7. Update token if refreshed
-      - name: Check if token was updated
-        id: check_token
-        run: |
-          if [ -f token.json ]; then
-            NEW_TOKEN=$(base64 -w 0 token.json)
-            echo "token_updated=true" >> $GITHUB_OUTPUT
-            echo "new_token=$NEW_TOKEN" >> $GITHUB_OUTPUT
-          else
-            echo "token_updated=false" >> $GITHUB_OUTPUT
-          fi
-      
-      # 8. Save updated token (if changed)
-      - name: Update token secret if needed
-        if: steps.check_token.outputs.token_updated == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "🔄 Token was refreshed, updating secret..."
-          # Note: This requires additional setup - see documentation
-          echo "⚠️  Manual token update may be needed if expired"
-      
-      # 9. Cleanup
+      # 7. Cleanup
       - name: Cleanup credentials
         if: always()
         run: |
           rm -f credentials.json token.json
           echo "🧹 Cleaned up temporary files"
       
-      # 10. Upload logs as artifact
+      # 8. Upload logs as artifact
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
