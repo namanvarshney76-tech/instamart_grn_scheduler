@@ -1,5 +1,3 @@
-[file name]: app.py
-[file content begin]
 #!/usr/bin/env python3
 """
 Instamart GRN Scheduler - Runs workflows every 3 hours and logs to Google Sheets
@@ -1195,4 +1193,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-[file content end]
