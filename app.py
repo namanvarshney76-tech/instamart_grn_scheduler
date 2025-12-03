@@ -1,3 +1,5 @@
+[file name]: app.py
+[file content begin]
 #!/usr/bin/env python3
 """
 Instamart GRN Scheduler - Runs workflows every 3 hours and logs to Google Sheets
@@ -50,8 +52,8 @@ CONFIG = {
         'sender': '',
         'search_term': 'grn & purchase return',
         'attachment_filter': 'GRN',
-        'days_back': 2,
-        'max_results': 500
+        'days_back': 7,
+        'max_results': 1000
     },
     'sheet': {
         'llama_api_key': 'llx-csECp5RB25AeiLp57MQ8GnpViLFNyaezTOoHQIiwD7yn0CMr',
@@ -59,12 +61,16 @@ CONFIG = {
         'drive_folder_id': '19basSTaOUB-X0FlrwmBkeVULgE8nBQ5x',
         'spreadsheet_id': '16WLcJKfkSLkTj1io962aSkgTGbk09PMdJTgkWNn11fw',
         'sheet_range': 'instamartgrn',
-        'days_back': 2,
-        'max_files': 500
+        'days_back': 7,
+        'max_files': 1000
     },
     'workflow_log': {
         'spreadsheet_id': '16WLcJKfkSLkTj1io962aSkgTGbk09PMdJTgkWNn11fw',
         'sheet_range': 'workflow_logs'
+    },
+    'notifications': {
+        'recipients': ['keyur@thebakersdozen.in', 'your-email@example.com'],  # Add your email here
+        'sender_email': 'your-gmail@gmail.com'  # Will be auto-populated from authenticated user
     },
     'credentials_path': 'credentials.json',
     'token_path': 'token.json'
@@ -77,8 +83,11 @@ class InstamartAutomation:
         self.drive_service = None
         self.sheets_service = None
         
-        # API scopes
-        self.gmail_scopes = ['https://www.googleapis.com/auth/gmail.readonly']
+        # API scopes - Added gmail.send scope for email notifications
+        self.gmail_scopes = [
+            'https://www.googleapis.com/auth/gmail.readonly',
+            'https://www.googleapis.com/auth/gmail.send'
+        ]
         self.drive_scopes = ['https://www.googleapis.com/auth/drive']
         self.sheets_scopes = ['https://www.googleapis.com/auth/spreadsheets']
     
@@ -128,12 +137,107 @@ class InstamartAutomation:
             self.drive_service = build('drive', 'v3', credentials=creds)
             self.sheets_service = build('sheets', 'v4', credentials=creds)
             
+            # Get authenticated user's email for sender
+            try:
+                profile = self.gmail_service.users().getProfile(userId='me').execute()
+                CONFIG['notifications']['sender_email'] = profile['emailAddress']
+                self.log(f"Authenticated as: {profile['emailAddress']}", "INFO")
+            except Exception as e:
+                self.log(f"Could not get user profile: {str(e)}", "WARNING")
+            
             self.log("Authentication successful!", "INFO")
             return True
             
         except Exception as e:
             self.log(f"Authentication failed: {str(e)}", "ERROR")
             return False
+    
+    def send_email_notification(self, summary_data: dict):
+        """Send email notification with workflow summary"""
+        try:
+            self.log("Preparing email notification...", "INFO")
+            
+            # Get sender email from authenticated user
+            sender_email = CONFIG['notifications']['sender_email']
+            
+            # Create email body
+            subject = f"Instamart GRN Scheduler Report - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            
+            # Format the email body
+            body_lines = [
+                "INSTAMART GRN SCHEDULER WORKFLOW SUMMARY",
+                "=" * 50,
+                "",
+                f"Report Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                f"Days Back Parameter: {CONFIG['mail']['days_back']} days",
+                "",
+                "MAIL TO DRIVE WORKFLOW:",
+                f"  • Number of emails checked: {summary_data.get('mail_emails_checked', 0)}",
+                f"  • Number of attachments found: {summary_data.get('mail_attachments_found', 0)}",
+                f"  • Number of attachments skipped: {summary_data.get('mail_attachments_skipped', 0)}",
+                f"  • Number of attachments uploaded: {summary_data.get('mail_attachments_uploaded', 0)}",
+                f"  • Failed to upload: {summary_data.get('mail_upload_failed', 0)}",
+                "",
+                "DRIVE TO SHEET WORKFLOW:",
+                f"  • Number of files found (last {CONFIG['sheet']['days_back']} days): {summary_data.get('drive_files_found', 0)}",
+                f"  • Number of files skipped (duplicates): {summary_data.get('drive_files_skipped', 0)}",
+                f"  • Number of files processed: {summary_data.get('drive_files_processed', 0)}",
+                f"  • Number of files failed to process: {summary_data.get('drive_files_failed', 0)}",
+                f"  • Total rows added to sheet: {summary_data.get('drive_rows_added', 0)}",
+                "",
+                "OVERALL STATUS:",
+                f"  • Total Duration: {summary_data.get('total_duration', '0s')}",
+                f"  • Workflow Status: {'SUCCESS' if summary_data.get('overall_success', False) else 'PARTIAL SUCCESS' if summary_data.get('any_success', False) else 'FAILED'}",
+                "",
+                "=" * 50,
+                "This is an automated report from Instamart GRN Scheduler.",
+                ""
+            ]
+            
+            email_body = "\n".join(body_lines)
+            
+            # Create message
+            message = self.create_email_message(
+                sender=sender_email,
+                to=CONFIG['notifications']['recipients'],
+                subject=subject,
+                body_text=email_body
+            )
+            
+            # Send email
+            sent_message = self.gmail_service.users().messages().send(
+                userId='me',
+                body=message
+            ).execute()
+            
+            self.log(f"Email notification sent successfully! Message ID: {sent_message['id']}", "INFO")
+            return True
+            
+        except Exception as e:
+            self.log(f"Failed to send email notification: {str(e)}", "ERROR")
+            return False
+    
+    def create_email_message(self, sender: str, to: list, subject: str, body_text: str) -> dict:
+        """Create an email message in Gmail format"""
+        # Create email headers
+        message_parts = [
+            f"From: {sender}",
+            f"To: {', '.join(to)}",
+            f"Subject: {subject}",
+            "Content-Type: text/plain; charset=utf-8",
+            "MIME-Version: 1.0",
+            "",
+            body_text
+        ]
+        
+        message = "\n".join(message_parts)
+        
+        # Encode message in base64
+        encoded_message = base64.urlsafe_b64encode(message.encode("utf-8")).decode("utf-8")
+        
+        return {
+            'raw': encoded_message
+        }
     
     def search_emails(self, sender: str = "", search_term: str = "", 
                      days_back: int = 7, max_results: int = 50) -> List[Dict]:
@@ -298,30 +402,30 @@ class InstamartAutomation:
             return False
     
     def process_attachment(self, message_id: str, part: Dict, sender_info: Dict, 
-                          search_term: str, base_folder_id: str, attachment_filter: str) -> bool:
-        """Process and upload a single attachment"""
+                          search_term: str, base_folder_id: str, attachment_filter: str) -> Dict:
+        """Process and upload a single attachment, returns dict with status"""
         try:
             filename = part.get("filename", "")
             if not filename:
-                return False
+                return {'status': 'failed', 'filename': 'unknown', 'reason': 'no filename'}
             
             if attachment_filter and attachment_filter.lower() not in filename.lower():
                 self.log(f"[SKIPPED] Attachment {filename} does not contain '{attachment_filter}'")
-                return False
+                return {'status': 'skipped', 'filename': filename, 'reason': 'filter mismatch'}
             
             clean_filename = self.sanitize_filename(filename)
             final_filename = clean_filename
 
             attachment_id = part["body"].get("attachmentId")
             if not attachment_id:
-                return False
+                return {'status': 'failed', 'filename': filename, 'reason': 'no attachment id'}
             
             att = self.gmail_service.users().messages().attachments().get(
                 userId='me', messageId=message_id, id=attachment_id
             ).execute()
             
             if not att.get("data"):
-                return False
+                return {'status': 'failed', 'filename': filename, 'reason': 'no attachment data'}
             
             file_data = base64.urlsafe_b64decode(att["data"].encode("UTF-8"))
             
@@ -335,33 +439,49 @@ class InstamartAutomation:
             
             if success:
                 self.log(f"[SUCCESS] Processed attachment: {filename}")
-            
-            return success
+                return {'status': 'success', 'filename': filename}
+            else:
+                return {'status': 'failed', 'filename': filename, 'reason': 'upload failed'}
             
         except Exception as e:
             self.log(f"[ERROR] Failed to process attachment {part.get('filename', 'unknown')}: {str(e)}")
-            return False
+            return {'status': 'failed', 'filename': part.get('filename', 'unknown'), 'reason': str(e)}
     
     def extract_attachments_from_email(self, message_id: str, payload: Dict, 
                                      sender_info: Dict, search_term: str, 
-                                     base_folder_id: str, attachment_filter: str) -> int:
-        """Recursively extract all attachments from an email"""
-        processed_count = 0
+                                     base_folder_id: str, attachment_filter: str) -> Dict:
+        """Recursively extract all attachments from an email, returns stats"""
+        stats = {
+            'success': 0,
+            'skipped': 0,
+            'failed': 0,
+            'total': 0
+        }
         
         if "parts" in payload:
             for part in payload["parts"]:
-                processed_count += self.extract_attachments_from_email(
+                part_stats = self.extract_attachments_from_email(
                     message_id, part, sender_info, search_term, base_folder_id, attachment_filter
                 )
+                stats['success'] += part_stats['success']
+                stats['skipped'] += part_stats['skipped']
+                stats['failed'] += part_stats['failed']
+                stats['total'] += part_stats['total']
         
         elif payload.get("filename") and "attachmentId" in payload.get("body", {}):
-            if self.process_attachment(message_id, payload, sender_info, search_term, base_folder_id, attachment_filter):
-                processed_count += 1
+            result = self.process_attachment(message_id, payload, sender_info, search_term, base_folder_id, attachment_filter)
+            stats['total'] += 1
+            if result['status'] == 'success':
+                stats['success'] += 1
+            elif result['status'] == 'skipped':
+                stats['skipped'] += 1
+            else:
+                stats['failed'] += 1
         
-        return processed_count
+        return stats
     
-    def process_mail_to_drive_workflow(self, config: dict):
-        """Process Mail to Drive workflow"""
+    def process_mail_to_drive_workflow(self, config: dict) -> Dict:
+        """Process Mail to Drive workflow, returns detailed stats"""
         try:
             self.log("[START] Starting Gmail to Google Drive automation")
             
@@ -374,19 +494,36 @@ class InstamartAutomation:
             
             if not emails:
                 self.log("[INFO] No emails found matching criteria")
-                return {'success': True, 'processed': 0, 'total_attachments': 0, 'failed': 0}
+                return {
+                    'success': True, 
+                    'emails_checked': 0,
+                    'attachments_found': 0,
+                    'attachments_skipped': 0,
+                    'attachments_uploaded': 0,
+                    'upload_failed': 0,
+                    'processed_emails': 0
+                }
             
             base_folder_name = f"Gmail_Attachments"
             base_folder_id = self.create_drive_folder(base_folder_name, config.get('gdrive_folder_id'))
             if not base_folder_id:
                 self.log("[ERROR] Failed to create base folder in Google Drive")
-                return {'success': False, 'processed': 0, 'total_attachments': 0, 'failed': 0}
+                return {
+                    'success': False, 
+                    'emails_checked': len(emails),
+                    'attachments_found': 0,
+                    'attachments_skipped': 0,
+                    'attachments_uploaded': 0,
+                    'upload_failed': 0,
+                    'processed_emails': 0
+                }
             
             stats = {
                 'total_emails': len(emails),
                 'processed_emails': 0,
                 'total_attachments': 0,
                 'successful_uploads': 0,
+                'skipped_attachments': 0,
                 'failed_uploads': 0
             }
             
@@ -405,37 +542,52 @@ class InstamartAutomation:
                     if not message or not message.get('payload'):
                         continue
                     
-                    attachment_count = self.extract_attachments_from_email(
+                    attachment_stats = self.extract_attachments_from_email(
                         email['id'], message['payload'], sender_info, config['search_term'], base_folder_id, config['attachment_filter']
                     )
                     
-                    stats['total_attachments'] += attachment_count
-                    stats['successful_uploads'] += attachment_count
+                    stats['total_attachments'] += attachment_stats['total']
+                    stats['successful_uploads'] += attachment_stats['success']
+                    stats['skipped_attachments'] += attachment_stats['skipped']
+                    stats['failed_uploads'] += attachment_stats['failed']
                     stats['processed_emails'] += 1
                     
                     subject = sender_info.get('subject', 'No Subject')[:50]
-                    self.log(f"[PROCESS] Found {attachment_count} attachments in email: {subject}")
+                    self.log(f"[PROCESS] Email: {subject} - Success: {attachment_stats['success']}, Skipped: {attachment_stats['skipped']}, Failed: {attachment_stats['failed']}")
                     
                 except Exception as e:
                     self.log(f"[ERROR] Failed to process email {email.get('id', 'unknown')}: {str(e)}")
                     stats['failed_uploads'] += 1
             
             self.log("[COMPLETE] Mail to Drive workflow complete!")
-            self.log(f"[STATS] Emails processed: {stats['processed_emails']}/{stats['total_emails']}")
-            self.log(f"[STATS] Total attachments: {stats['total_attachments']}")
-            self.log(f"[STATS] Successful uploads: {stats['successful_uploads']}")
-            self.log(f"[STATS] Failed uploads: {stats['failed_uploads']}")
+            self.log(f"[STATS] Emails checked: {stats['total_emails']}")
+            self.log(f"[STATS] Emails processed: {stats['processed_emails']}")
+            self.log(f"[STATS] Total attachments found: {stats['total_attachments']}")
+            self.log(f"[STATS] Attachments uploaded: {stats['successful_uploads']}")
+            self.log(f"[STATS] Attachments skipped: {stats['skipped_attachments']}")
+            self.log(f"[STATS] Attachments failed: {stats['failed_uploads']}")
             
             return {
                 'success': True, 
-                'processed': stats['processed_emails'], 
-                'total_attachments': stats['successful_uploads'],
-                'failed': stats['failed_uploads']
+                'emails_checked': stats['total_emails'],
+                'attachments_found': stats['total_attachments'],
+                'attachments_skipped': stats['skipped_attachments'],
+                'attachments_uploaded': stats['successful_uploads'],
+                'upload_failed': stats['failed_uploads'],
+                'processed_emails': stats['processed_emails']
             }
             
         except Exception as e:
             self.log(f"Mail to Drive workflow failed: {str(e)}", "ERROR")
-            return {'success': False, 'processed': 0, 'total_attachments': 0, 'failed': 0}
+            return {
+                'success': False, 
+                'emails_checked': 0,
+                'attachments_found': 0,
+                'attachments_skipped': 0,
+                'attachments_uploaded': 0,
+                'upload_failed': 0,
+                'processed_emails': 0
+            }
     
     def list_drive_files(self, folder_id: str, days_back: int = 1) -> List[Dict]:
         """List all PDF files in a Google Drive folder filtered by creation date"""
@@ -668,14 +820,15 @@ class InstamartAutomation:
             self.log(f"[ERROR] Failed to update headers: {str(e)}")
             return False
     
-    def process_drive_to_sheet_workflow(self, config: dict, skip_existing: bool = True):
-        """Process Drive to Sheet workflow"""
+    def process_drive_to_sheet_workflow(self, config: dict, skip_existing: bool = True) -> Dict:
+        """Process Drive to Sheet workflow, returns detailed stats"""
         stats = {
             'total_pdfs': 0,
             'processed_pdfs': 0,
             'failed_pdfs': 0,
             'skipped_pdfs': 0,
-            'rows_added': 0
+            'rows_added': 0,
+            'files_found': 0
         }
         
         if not LLAMA_AVAILABLE:
@@ -703,6 +856,7 @@ class InstamartAutomation:
                 self.log(f"Skipping {len(existing_names)} already processed files", "INFO")
             
             pdf_files = self.list_drive_files(config['drive_folder_id'], config.get('days_back', 7))
+            stats['files_found'] = len(pdf_files)
             stats['total_pdfs'] = len(pdf_files)
             
             if skip_existing:
@@ -847,8 +1001,9 @@ class InstamartAutomation:
                     stats['failed_pdfs'] += 1
             
             self.log("[COMPLETE] Drive to Sheet workflow complete!")
+            self.log(f"[STATS] Files found: {stats['files_found']}")
             self.log(f"[STATS] PDFs processed: {stats['processed_pdfs']}/{stats['total_pdfs']}")
-            self.log(f"[STATS] PDFs skipped: {stats['skipped_pdfs']}")
+            self.log(f"[STATS] PDFs skipped (duplicates): {stats['skipped_pdfs']}")
             self.log(f"[STATS] PDFs failed: {stats['failed_pdfs']}")
             self.log(f"[STATS] Total rows added: {stats['rows_added']}")
             
@@ -908,7 +1063,7 @@ class InstamartAutomation:
             self.log(f"[ERROR] Failed to log workflow: {str(e)}")
     
     def run_scheduled_workflow(self):
-        """Run both workflows in sequence and log results"""
+        """Run both workflows in sequence, log results, and send email summary"""
         try:
             self.log("=" * 80)
             self.log("STARTING SCHEDULED WORKFLOW RUN")
@@ -944,15 +1099,53 @@ class InstamartAutomation:
             overall_end = datetime.now(timezone.utc)
             total_duration = (overall_end - overall_start).total_seconds()
             
+            # Format duration for display
+            duration_str = f"{total_duration:.2f}s"
+            if total_duration >= 60:
+                minutes = int(total_duration // 60)
+                seconds = int(total_duration % 60)
+                duration_str = f"{minutes}m {seconds}s"
+            
+            # Prepare summary data for email
+            summary_data = {
+                'days_back': CONFIG['mail']['days_back'],
+                'mail_emails_checked': mail_stats.get('emails_checked', 0),
+                'mail_attachments_found': mail_stats.get('attachments_found', 0),
+                'mail_attachments_skipped': mail_stats.get('attachments_skipped', 0),
+                'mail_attachments_uploaded': mail_stats.get('attachments_uploaded', 0),
+                'mail_upload_failed': mail_stats.get('upload_failed', 0),
+                'drive_files_found': sheet_stats.get('files_found', 0),
+                'drive_files_skipped': sheet_stats.get('skipped_pdfs', 0),
+                'drive_files_processed': sheet_stats.get('processed_pdfs', 0),
+                'drive_files_failed': sheet_stats.get('failed_pdfs', 0),
+                'drive_rows_added': sheet_stats.get('rows_added', 0),
+                'total_duration': duration_str,
+                'overall_success': mail_stats.get('success', False) and sheet_stats.get('processed_pdfs', 0) > 0,
+                'any_success': mail_stats.get('success', False) or sheet_stats.get('processed_pdfs', 0) > 0,
+                'report_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            
+            # Send email notification
+            self.log("\n[SENDING EMAIL] Preparing and sending workflow summary...")
+            email_sent = self.send_email_notification(summary_data)
+            
+            if email_sent:
+                self.log("[EMAIL] Summary email sent successfully!")
+            else:
+                self.log("[EMAIL WARNING] Failed to send summary email")
+            
             self.log("\n" + "=" * 80)
             self.log("SCHEDULED WORKFLOW RUN COMPLETED")
-            self.log(f"Total Duration: {total_duration:.2f} seconds")
-            self.log(f"Mail to Drive: {mail_stats['processed']} emails, {mail_stats['total_attachments']} attachments")
-            self.log(f"Drive to Sheet: {sheet_stats['processed_pdfs']} PDFs processed, {sheet_stats['rows_added']} rows added")
+            self.log(f"Total Duration: {duration_str}")
+            self.log(f"Mail to Drive: {mail_stats.get('emails_checked', 0)} emails checked, {mail_stats.get('attachments_uploaded', 0)} attachments uploaded")
+            self.log(f"Drive to Sheet: {sheet_stats.get('processed_pdfs', 0)} PDFs processed, {sheet_stats.get('rows_added', 0)} rows added")
             self.log("=" * 80 + "\n")
+            
+            return summary_data
             
         except Exception as e:
             self.log(f"[ERROR] Scheduled workflow failed: {str(e)}", "ERROR")
+            return None
 
 
 def main():
@@ -974,7 +1167,14 @@ def main():
     
     # Run immediately on start
     print("\nRunning initial workflow...")
-    automation.run_scheduled_workflow()
+    summary = automation.run_scheduled_workflow()
+    
+    if summary:
+        print("\nWorkflow Summary:")
+        print(f"  Days Back: {summary['days_back']}")
+        print(f"  Mail to Drive: {summary['mail_attachments_uploaded']} attachments uploaded")
+        print(f"  Drive to Sheet: {summary['drive_files_processed']} files processed")
+        print(f"  Email sent to: {', '.join(CONFIG['notifications']['recipients'])}")
     
     # Schedule to run every 3 hours
     schedule.every(3).hours.do(automation.run_scheduled_workflow)
@@ -995,3 +1195,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+[file content end]
