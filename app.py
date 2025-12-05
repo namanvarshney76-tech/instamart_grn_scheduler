@@ -67,7 +67,7 @@ CONFIG = {
         'sheet_range': 'workflow_logs'
     },
     'notifications': {
-        'recipients': ['keyur@thebakersdozen.in', 'your-email@example.com'],  # Add your email here
+        'recipients': ['keyur@thebakersdozen.in'],  # Add your email here
         'sender_email': 'your-gmail@gmail.com'  # Will be auto-populated from authenticated user
     },
     'credentials_path': 'credentials.json',
@@ -1193,3 +1193,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
