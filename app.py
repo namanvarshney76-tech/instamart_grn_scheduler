@@ -590,7 +590,7 @@ class InstamartAutomation:
     def list_drive_files(self, folder_id: str, days_back: int = 1) -> List[Dict]:
         """List all PDF files in a Google Drive folder filtered by creation date"""
         try:
-            start_datetime = datetime.utcnow() - timedelta(days=days_back - 1)
+            start_datetime = datetime.utcnow() - timedelta(days=days_back)
             start_str = start_datetime.strftime('%Y-%m-%dT00:00:00Z')
             query = f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false and createdTime >= '{start_str}'"
             
@@ -636,17 +636,43 @@ class InstamartAutomation:
         
         for attempt in range(1, max_retries + 1):
             try:
+                # Use only the sheet name for appending (remove column range if present)
+                if '!' in range_name:
+                    sheet_name = range_name.split('!')[0]
+                    append_range = f"{sheet_name}"
+                else:
+                    append_range = range_name
+                
                 body = {'values': values}
+                
+                self.log(f"[SHEETS] Attempting to append {len(values)} rows to sheet...", "DEBUG")
+                
+                # Use the append method which automatically adds rows at the end
                 result = self.sheets_service.spreadsheets().values().append(
                     spreadsheetId=spreadsheet_id, 
-                    range=range_name,
+                    range=append_range,  # Just sheet name, no column range
                     valueInputOption='USER_ENTERED', 
+                    insertDataOption='INSERT_ROWS',  # Always insert new rows
                     body=body
                 ).execute()
                 
                 updated_cells = result.get('updates', {}).get('updatedCells', 0)
-                self.log(f"[SHEETS] Appended {updated_cells} cells to Google Sheet")
+                updated_rows = result.get('updates', {}).get('updatedRows', 0)
+                self.log(f"[SHEETS] Successfully appended {updated_rows} rows ({updated_cells} cells) to Google Sheet", "INFO")
                 return True
+            except HttpError as e:
+                try:
+                    error_details = json.loads(e.content.decode('utf-8'))
+                    error_msg = error_details.get('error', {}).get('message', str(e))
+                except:
+                    error_msg = str(e)
+                
+                if attempt < max_retries:
+                    self.log(f"[SHEETS] Attempt {attempt} failed: {error_msg}")
+                    time.sleep(wait_time * attempt)  # Exponential backoff
+                else:
+                    self.log(f"[ERROR] Failed to append to Google Sheet after {max_retries} attempts: {error_msg}")
+                    return False
             except Exception as e:
                 if attempt < max_retries:
                     self.log(f"[SHEETS] Attempt {attempt} failed: {str(e)}")
@@ -777,25 +803,52 @@ class InstamartAutomation:
     def get_existing_source_files(self, spreadsheet_id: str, sheet_range: str) -> set:
         """Get set of existing source_file from Google Sheet"""
         try:
+            # Extract sheet name from range (e.g., "instamartgrn!A:Z" -> "instamartgrn")
+            sheet_name = sheet_range.split('!')[0] if '!' in sheet_range else sheet_range
+            
             result = self.sheets_service.spreadsheets().values().get(
                 spreadsheetId=spreadsheet_id,
-                range=sheet_range,
+                range=sheet_name,  # Just sheet name, no column range
                 majorDimension="ROWS"
             ).execute()
             
             values = result.get('values', [])
-            if not values:
+            if not values or len(values) <= 1:  # Only header or empty
+                self.log("Sheet is empty or only has headers", "INFO")
                 return set()
             
+            # Find the index of 'source_file' column
             headers = values[0]
-            if "source_file" not in headers:
-                self.log("No 'source_file' column found in sheet", "WARNING")
-                return set()
+            try:
+                source_file_index = headers.index("source_file")
+            except ValueError:
+                # If 'source_file' column not found, check for similar column names
+                possible_names = ["source_file", "source", "filename", "file_name", "Source File", "Document Name"]
+                for name in possible_names:
+                    if name in headers:
+                        source_file_index = headers.index(name)
+                        self.log(f"Found source file column as: {name}", "INFO")
+                        break
+                else:
+                    self.log("No source_file column found in sheet", "WARNING")
+                    return set()
             
-            name_index = headers.index("source_file")
-            existing_names = {row[name_index] for row in values[1:] if len(row) > name_index and row[name_index]}
+            # Collect all existing source files (case-insensitive)
+            existing_names = set()
+            for row_idx, row in enumerate(values[1:], 2):  # Skip header row
+                if len(row) > source_file_index and row[source_file_index]:
+                    file_name = row[source_file_index].strip()
+                    existing_names.add(file_name.lower())
+                elif row:  # Row exists but doesn't have source_file column
+                    self.log(f"Warning: Row {row_idx} has data but no source_file value", "DEBUG")
             
             self.log(f"Found {len(existing_names)} existing file names in sheet", "INFO")
+            
+            # Debug: Show first few existing names
+            if existing_names:
+                sample = list(existing_names)[:5]
+                self.log(f"Sample existing files: {sample}", "DEBUG")
+                
             return existing_names
             
         except Exception as e:
@@ -835,6 +888,8 @@ class InstamartAutomation:
         
         try:
             self.log("Starting Drive to Sheet workflow with LlamaParse", "INFO")
+            self.log(f"[DEBUG] Config: {config}", "DEBUG")
+            self.log(f"[DEBUG] Skip existing files: {skip_existing}", "DEBUG")
             
             os.environ["LLAMA_CLOUD_API_KEY"] = config['llama_api_key']
             extractor = LlamaExtract()
@@ -848,28 +903,48 @@ class InstamartAutomation:
             
             sheet_name = config['sheet_range'].split('!')[0]
             
+            # Get existing files from sheet BEFORE downloading any files
             existing_names = set()
             if skip_existing:
                 existing_names = self.get_existing_source_files(config['spreadsheet_id'], config['sheet_range'])
-                self.log(f"Skipping {len(existing_names)} already processed files", "INFO")
-            
+                self.log(f"Will skip {len(existing_names)} already processed files", "INFO")
+                self.log(f"[DEBUG] Existing file count from sheet: {len(existing_names)}", "DEBUG")
+
             pdf_files = self.list_drive_files(config['drive_folder_id'], config.get('days_back', 7))
             stats['files_found'] = len(pdf_files)
             stats['total_pdfs'] = len(pdf_files)
-            
-            if skip_existing:
+
+            # Filter out already processed files (case-insensitive comparison)
+            if skip_existing and existing_names:
                 original_count = len(pdf_files)
-                pdf_files = [f for f in pdf_files if f['name'] not in existing_names]
+                new_files = []
+                skipped_files = []
+                
+                for f in pdf_files:
+                    if f['name'].lower().strip() in existing_names:
+                        skipped_files.append(f['name'])
+                    else:
+                        new_files.append(f)
+                
+                pdf_files = new_files
                 stats['skipped_pdfs'] = original_count - len(pdf_files)
-                self.log(f"After filtering, {len(pdf_files)} PDFs to process", "INFO")
-            
+                
+                if skipped_files:
+                    self.log(f"Skipped {len(skipped_files)} already processed files:", "INFO")
+                    for i, name in enumerate(skipped_files[:5]):  # Show first 5
+                        self.log(f"  - {name}", "INFO")
+                    if len(skipped_files) > 5:
+                        self.log(f"  ... and {len(skipped_files) - 5} more", "INFO")
+                
+                self.log(f"After filtering duplicates, {len(pdf_files)} new PDFs to process", "INFO")
+
             max_files = config.get('max_files')
             if max_files is not None:
                 pdf_files = pdf_files[:max_files]
                 self.log(f"Limited to {len(pdf_files)} PDFs after max_files limit", "INFO")
-            
+
             if not pdf_files:
-                self.log("[INFO] No PDF files found to process")
+                self.log("[INFO] No new PDF files found to process")
                 return stats
             
             self.log(f"Found {len(pdf_files)} PDF files to process")
@@ -1193,4 +1268,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
